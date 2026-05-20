@@ -1841,32 +1841,22 @@ class TestStockReconciliation(ERPNextTestSuite, StockTestMixin):
 
 		self.assertEqual(frappe.get_value("Serial No", serial_no, "status"), "Delivered")
 
+	@ERPNextTestSuite.change_settings("Stock Settings", {"remove_unchanged_stock_reconciliation_entries": 0})
 	def test_unchanged_rows_kept_when_setting_disabled(self):
 		item_code = self.make_item().name
 
 		create_stock_reconciliation(item_code=item_code, qty=10, rate=100)
 
-		frappe.db.set_single_value(
-			"Stock Settings",
-			"remove_unchanged_stock_reconciliation_entries",
-			0,
-		)
-
-		sr2 = create_stock_reconciliation(item_code=item_code, qty=10, rate=100, do_not_submit=True)
+		sr = create_stock_reconciliation(item_code=item_code, qty=10, rate=100, do_not_submit=True)
 
 		# If the setting is disabled, we expect the stock reconciliation to still have the entry.
-		self.assertEqual(len(sr2.items), 1)
+		self.assertEqual(len(sr.items), 1)
 
+	@ERPNextTestSuite.change_settings("Stock Settings", {"remove_unchanged_stock_reconciliation_entries": 1})
 	def test_unchanged_rows_removed_when_setting_enabled(self):
 		item_code = self.make_item().name
 
 		create_stock_reconciliation(item_code=item_code, qty=10, rate=100)
-
-		frappe.db.set_single_value(
-			"Stock Settings",
-			"remove_unchanged_stock_reconciliation_entries",
-			1,
-		)
 
 		# If the setting is enabled, we expect the stock reconciliation to end up empty
 		# because all entries have unchanged values.
@@ -1878,21 +1868,51 @@ class TestStockReconciliation(ERPNextTestSuite, StockTestMixin):
 			rate=100,
 		)
 
+	@ERPNextTestSuite.change_settings("Stock Settings", {"remove_unchanged_stock_reconciliation_entries": 0})
 	def test_unchanged_only_reco_cannot_be_submitted(self):
 		item_code = self.make_item().name
 
 		create_stock_reconciliation(item_code=item_code, qty=10, rate=100)
 
-		frappe.db.set_single_value(
-			"Stock Settings",
-			"remove_unchanged_stock_reconciliation_entries",
-			0,
-		)
-
 		sr = create_stock_reconciliation(item_code=item_code, qty=10, rate=100, do_not_submit=True)
 
 		# Submitting with unchanged rows only is not supported and should throw a descriptive error.
 		self.assertRaises(frappe.ValidationError, sr.submit)
+
+	# Cancelling a mixed stock reconciliation (some rows changed, some unchanged)
+	# must not create cancellation SLEs for unchanged rows.
+	@ERPNextTestSuite.change_settings("Stock Settings", {"remove_unchanged_stock_reconciliation_entries": 0})
+	def test_cancel_does_not_create_sle_for_unchanged_rows(self):
+		warehouse = "_Test Warehouse - _TC"
+		item_a = self.make_item().name
+		item_b = self.make_item().name
+
+		# Establish opening stock for both items.
+		create_stock_reconciliation(item_code=item_a, warehouse=warehouse, qty=10, rate=100)
+		create_stock_reconciliation(item_code=item_b, warehouse=warehouse, qty=5, rate=200)
+
+		# Mixed stock reconciliation: change item_a, leave item_b at the same qty and rate.
+		sr = create_stock_reconciliation(
+			item_code=item_a, warehouse=warehouse, qty=20, rate=100, do_not_submit=True
+		)
+		sr.append("items", {"item_code": item_b, "warehouse": warehouse, "qty": 5, "valuation_rate": 200})
+		sr.save()
+		sr.submit()
+		sr.reload()
+
+		# Only item_a should have a SLE.
+		sle_count = frappe.db.count("Stock Ledger Entry", {"voucher_no": sr.name, "is_cancelled": 0})
+		self.assertEqual(sle_count, 1)
+
+		sr.cancel()
+
+		# item_b stock balance must still be 5 after cancel,
+		item_b_qty = frappe.db.get_value("Bin", {"item_code": item_b, "warehouse": warehouse}, "actual_qty")
+		self.assertEqual(flt(item_b_qty), 5.0)
+
+		# and item_a must be back to 10.
+		item_a_qty = frappe.db.get_value("Bin", {"item_code": item_a, "warehouse": warehouse}, "actual_qty")
+		self.assertEqual(flt(item_a_qty), 10.0)
 
 
 def create_batch_item_with_batch(item_name, batch_id):

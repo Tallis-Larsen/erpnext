@@ -946,8 +946,19 @@ class StockReconciliation(StockController):
 	def make_sle_on_cancel(self):
 		sl_entries = []
 
+		rows_with_sle = set(
+			frappe.db.get_all(
+				"Stock Ledger Entry",
+				filters={"voucher_no": self.name, "is_cancelled": 0},
+				pluck="voucher_detail_no",
+			)
+		)
+
 		has_serial_no = False
 		for row in self.items:
+			if row.name not in rows_with_sle:
+				continue
+
 			sl_entries.append(self.get_sle_for_items(row))
 			if row.serial_and_batch_bundle and row.current_serial_and_batch_bundle:
 				sl_entries.append(self.get_sle_for_items(row, current_bundle=False))
